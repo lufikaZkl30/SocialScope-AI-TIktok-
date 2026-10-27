@@ -40,7 +40,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2) Start the backend API
+### 2) Start the backend API in a separate PowerShell terminal
 
 ```powershell
 cd "D:\WEB ALL\SocialScope-AI-TikTok"
@@ -48,9 +48,9 @@ cd "D:\WEB ALL\SocialScope-AI-TikTok"
 python app.py
 ```
 
-The Flask app runs at http://127.0.0.1:5000.
+The Flask app runs at http://127.0.0.1:5000. Leave this terminal open while using the app.
 
-### 3) Start the frontend
+### 3) Start the frontend in another PowerShell terminal
 
 ```powershell
 cd "D:\WEB ALL\SocialScope-AI-TikTok\frontend"
@@ -58,7 +58,16 @@ npm install
 npm run dev
 ```
 
-The Vite app runs at http://localhost:5173.
+Open the Vite URL shown in the terminal (normally http://localhost:5173). Leave this terminal open too.
+
+The frontend sends API requests to `/api/...`; Vite proxies them to Flask at `http://127.0.0.1:5000`. You do not need to open the Flask URL in the browser or configure CORS for local development. The dashboard header shows whether the backend health endpoint is connected.
+
+### If the frontend says the API is offline
+
+1. Make sure both terminals are still running and there are no startup errors.
+2. Open http://127.0.0.1:5000/api/health. It should return JSON with `"status": "ok"`.
+3. If health works but the dashboard is still offline, stop and restart Vite after checking `frontend/vite.config.js` has the API proxy enabled.
+4. If health does not respond, activate the project virtual environment and start Flask again with `python app.py`.
 
 ## API endpoints
 

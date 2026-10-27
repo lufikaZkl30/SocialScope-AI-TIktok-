@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -85,8 +85,22 @@ function getStatusBadge(status) {
     validation_only: 'border-cyan-500/50 bg-cyan-500/10 text-cyan-300',
     unavailable: 'border-amber-500/50 bg-amber-500/10 text-amber-300',
     error: 'border-rose-500/50 bg-rose-500/10 text-rose-300',
+    checking: 'border-slate-700 bg-slate-800/80 text-slate-300',
+    connected: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300',
+    disconnected: 'border-rose-500/50 bg-rose-500/10 text-rose-300',
   };
   return variants[status] || variants.idle;
+}
+
+async function checkBackendConnection() {
+  try {
+    const response = await fetch('/api/health');
+    if (!response.ok) return false;
+    const payload = await response.json();
+    return payload.status === 'ok';
+  } catch {
+    return false;
+  }
 }
 
 function StatCard({ icon: Icon, label, value, accentClass = 'text-cyan-300', helper }) {
@@ -113,8 +127,28 @@ function App() {
   const [urlLoading, setUrlLoading] = useState(false);
   const [csvLoading, setCsvLoading] = useState(false);
   const [csvError, setCsvError] = useState('');
+  const [backendStatus, setBackendStatus] = useState('checking');
   const [result, setResult] = useState(initialState);
   const [fileName, setFileName] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    checkBackendConnection().then((connected) => {
+      if (active) {
+        setBackendStatus(connected ? 'connected' : 'disconnected');
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const retryBackendConnection = async () => {
+    setBackendStatus('checking');
+    const connected = await checkBackendConnection();
+    setBackendStatus(connected ? 'connected' : 'disconnected');
+  };
 
   const sentimentData = useMemo(
     () => [
@@ -156,7 +190,7 @@ function App() {
 
     setUrlLoading(true);
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/analyze-url', {
+      const response = await fetch('/api/analyze-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: trimmed }),
@@ -170,7 +204,7 @@ function App() {
     } catch (error) {
       setUrlStatus({
         status: 'error',
-        message: 'Unable to reach the backend. Confirm the Flask API is running on port 5000.',
+        message: 'Unable to reach the backend. Start the Flask API on port 5000, then retry.',
         valid: false,
       });
     } finally {
@@ -189,7 +223,7 @@ function App() {
     formData.append('file', file);
 
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/analyze-csv', {
+      const response = await fetch('/api/analyze-csv', {
         method: 'POST',
         body: formData,
       });
@@ -247,7 +281,8 @@ function App() {
   };
 
   const isDataLoaded = result.summary.total_comments > 0;
-
+  
+// Dashboard layout and rendering logic
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur-sm">
@@ -255,6 +290,21 @@ function App() {
           <div>
             <p className="text-xs uppercase tracking-[0.32em] text-cyan-300">SocialScope AI</p>
             <h1 className="mt-1 text-2xl font-semibold text-white">TikTok Analytics</h1>
+          </div>
+          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className={`badge ${getStatusBadge(backendStatus)}`}>
+              API {backendStatus === 'checking' ? 'Checking' : backendStatus === 'connected' ? 'Connected' : 'Offline'}
+            </span>
+            {backendStatus === 'disconnected' ? (
+              <button
+                type="button"
+                onClick={retryBackendConnection}
+                className="text-xs text-cyan-300 underline underline-offset-2 hover:text-cyan-200"
+              >
+                Retry
+              </button>
+            ) : null}
           </div>
           <nav className="hidden gap-2 md:flex">
             {navItems.map((item) => (
@@ -270,6 +320,7 @@ function App() {
               </button>
             ))}
           </nav>
+          </div>
         </div>
       </header>
 
@@ -293,7 +344,9 @@ function App() {
               and potential coordinated activity through data-driven analysis.
             </p>
             <div className="mt-6 flex flex-wrap gap-3">
-              <span className="badge border-emerald-500/30 bg-emerald-500/10 text-emerald-200">Status: Ready</span>
+              <span className={`badge ${getStatusBadge(backendStatus)}`}>
+                API: {backendStatus === 'checking' ? 'Checking' : backendStatus === 'connected' ? 'Connected' : 'Offline'}
+              </span>
               <span className="badge border-violet-500/30 bg-violet-500/10 text-violet-200">Baseline NLP</span>
               <span className="badge border-cyan-500/30 bg-cyan-500/10 text-cyan-200">Explainable</span>
             </div>
