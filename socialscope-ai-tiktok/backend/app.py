@@ -25,7 +25,7 @@ def fail(code, message, status, details=None):
         body["error"]["details"] = details
     return jsonify(body), status
 
-
+# Create the Flask app
 def create_app(config=Config):
     app = Flask(__name__)
     app.config.from_object(config)
@@ -65,7 +65,8 @@ def create_app(config=Config):
             return fail("invalid_parameter", "similarity_threshold must be between 0.50 and 0.99.", 400)
         result = analyze_csv(f.read(), f.filename[:120], config, patterns, threshold)
         return ok(result)
-
+    
+# post endpoint to validate TikTok URL format and return analysis status
     @app.post("/api/analyze-url")
     def analyze_url_route():
         payload = request.get_json(silent=True)
