@@ -3,7 +3,7 @@ import { BarChart3, FileText, Info, Link2, Menu, Network, UploadCloud, X } from 
 
 export const NAV = [
   { id: 'overview', label: 'Overview', icon: BarChart3 },
-  { id: 'url', label: 'TikTok URL Analyzer', icon: Link2 },
+  { id: 'url', label: 'TikTok Data Search', icon: Link2 },
   { id: 'comments', label: 'Comment Analysis', icon: UploadCloud },
   { id: 'coordination', label: 'Coordination Signals', icon: Network },
   { id: 'reports', label: 'Reports', icon: FileText },

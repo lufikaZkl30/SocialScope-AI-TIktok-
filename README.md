@@ -17,7 +17,8 @@ Suggested repository name: `socialscope-ai-tiktok`
 | **Promotional signals** | Configurable keyword categories plus link and phone-number patterns. Output says *why* a comment was flagged and is labelled a **signal, not confirmed advertising**. |
 | **Repeated / similar comments** | Exact duplicates, duplicates after normalization, TF-IDF + cosine-similarity groups, and repeated 3–4 word phrases. |
 | **Potential coordination indicators** | Repeated-text share, posting-time bursts (needs timestamps), repeated text inside bursts, same text across video IDs (needs `video_id`). Presented as **indicators, not proof**. No account is ever named or accused. |
-| **TikTok URL check** | Validates the URL format and domain only. Reports honestly that **no comments are retrieved** because no authorized API connector is configured. No scraping. |
+| **TikTok Research API** | Searches public video metadata by description keyword, region, and date when an approved access token is configured. Returns video IDs and counts; **does not retrieve comments**. |
+| **TikTok URL check** | Validates the URL format and domain only. No scraping or access-restriction bypass. |
 | **Reports** | Dataset-quality table, limitations, and CSV export (comment results and summary). |
 
 ## Project structure
@@ -37,7 +38,7 @@ socialscope-ai-tiktok/
 │   │   ├── coordination.py     Exploratory coordination indicators
 │   │   ├── pipeline.py         Orchestration and response building
 │   │   └── errors.py
-│   ├── integrations/tiktok.py  URL validation + CommentSource interface (unconfigured)
+│   ├── integrations/tiktok.py  URL validation + authorized Research API video queries
 │   └── tests/test_api.py       pytest suite
 ├── frontend/
 │   ├── src/{App.jsx, api.js, utils.js, components/, pages/}
@@ -63,6 +64,7 @@ python app.py
 ```
 
 The API runs at `http://127.0.0.1:5000`. Check it by opening `http://127.0.0.1:5000/api/health`.
+To enable public video queries, add your currently valid, approved TikTok Research API bearer token to `backend/.env` as `TIKTOK_API_ACCESS_TOKEN`. The feature remains disabled without it.
 
 If PowerShell blocks `Activate.ps1` with an execution-policy error, run
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or use Command Prompt and `.venv\Scripts\activate.bat`.
@@ -110,8 +112,24 @@ All responses share one envelope. Success: `{"ok": true, "data": {...}}`. Error:
 | `GET /api/methodology` | Methods, keyword categories, limitations | — |
 | `POST /api/analyze-csv` | `multipart/form-data`: `file` (.csv), optional `similarity_threshold` (0.50–0.99) | 400 missing file or bad parameter · 413 too large / too many rows · 415 not `.csv` · 422 empty file, missing `comment` column, no usable rows |
 | `POST /api/analyze-url` | JSON `{"url": "..."}` | 400 bad request body · 422 invalid or unsupported URL |
+| `POST /api/research/videos` | Query approved TikTok Research API for public video metadata | 400 invalid query · 502 upstream/API error · 503 missing token, rate limit, or network error |
 
-`/api/analyze-url` returns `analysis_status: "validated_only"`, `content_analyzed: false` and `comments_retrieved: 0` for every valid URL, and includes the connector status.
+`POST /api/research/videos` queries the TikTok Research API. The request body uses `keyword`, `region_codes`, `start_date` and `end_date` (`YYYYMMDD`), with optional `max_count` (1-100) and `cursor`:
+
+```json
+{
+  "keyword": "hello world",
+  "region_codes": ["US", "CA"],
+  "start_date": "20261001",
+  "end_date": "20261001",
+  "max_count": 100,
+  "cursor": 0
+}
+```
+
+The backend requests `id`, `like_count`, `view_count`, `comment_count` and `share_count`. TikTok Research API access is restricted to approved applications; a token alone does not grant access. Put the approved bearer access token in `backend/.env` as `TIKTOK_API_ACCESS_TOKEN`. It is sent only from the backend to TikTok, never from the browser. Do not commit `.env` or paste tokens into chat. Follow TikTok's access, retention and use requirements.
+
+`/api/analyze-url` still only validates a URL and returns `analysis_status: "validated_only"`, `content_analyzed: false` and `comments_retrieved: 0`. The Research API video query does not fetch comments or feed the comment-analysis pipeline.
 
 ## Privacy and safety choices
 
@@ -127,13 +145,13 @@ All responses share one envelope. Success: `{"ok": true, "data": {...}}`. Error:
 - **Promotional signals** are keyword and pattern matches and will include false positives (and miss unlisted wording).
 - **Similarity and repeats** often reflect trends, memes or catchphrases.
 - **Coordination indicators** are statistics about one file, not proof of coordinated behaviour.
-- **No automatic retrieval.** Pasting a URL cannot fetch comments, because no authorized TikTok API connector exists in this project. Provide a CSV you are permitted to analyse.
+- **No automatic comment retrieval.** Pasting a URL does not fetch comments. The Research API integration only searches public video metadata; provide a CSV of comments you are permitted to analyse.
 - Size is capped at 5,000 comments because similarity grouping grows quickly with row count.
 - Python-side tests cover the analysis and API; the UI was exercised in a real browser (see below) but there is no automated frontend test suite yet.
 
-## Adding a real data source later
+## Adding an authorized comment source later
 
-Implement `CommentSource` in `backend/integrations/tiktok.py` (`status()` and `fetch_comments()`), return it from `get_connector()`, then have `/api/analyze-url` feed its comments into `analysis.pipeline`. Use only an API and permissions you are authorized to use, and keep tokens in `backend/.env` (never committed).
+The Research API video endpoint does not return comments. If an approved API that provides comments is available, implement `CommentSource` in `backend/integrations/tiktok.py` (`status()` and `fetch_comments()`), then explicitly connect its authorized results to `analysis.pipeline`. Use only permissions you are authorized to use, and keep credentials in `backend/.env` (never committed).
 
 ## Future improvements
 

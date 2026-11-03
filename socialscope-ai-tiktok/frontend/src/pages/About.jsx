@@ -3,7 +3,7 @@ import { getMethodology } from '../api.js';
 import { Alert, Badge, Card, SectionTitle, Spinner } from '../components/ui.jsx';
 
 const FUTURE = [
-  'Connect an authorized TikTok data source by implementing the CommentSource interface in backend/integrations/tiktok.py.',
+  'Add an authorized comment data source if TikTok provides an approved comments API; Research API video queries do not return comments.',
   'Evaluate and compare an Indonesian transformer model (for example IndoBERT) against the lexicon baseline on labelled data.',
   'Add a labelled Indonesian test set and a repeatable evaluation report.',
   'Add language detection for mixed Indonesian, English and regional-language comments.',

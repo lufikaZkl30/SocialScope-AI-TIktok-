@@ -24,6 +24,9 @@ export const getMethodology = () => request('/api/methodology');
 export const analyzeUrl = (url) => request('/api/analyze-url', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
 });
+export const searchResearchVideos = (query) => request('/api/research/videos', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query),
+});
 export const analyzeCsv = (file, threshold) => {
   const fd = new FormData();
   fd.append('file', file);

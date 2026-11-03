@@ -1,15 +1,17 @@
 """Tests use small synthetic strings written for testing only; they are not analysis results."""
 import io
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import app as app_module  # noqa: E402
 from app import create_app  # noqa: E402
 from analysis.preprocessing import normalize_text  # noqa: E402
 from analysis.sentiment import evaluate, score_text  # noqa: E402
-from integrations.tiktok import validate_tiktok_url  # noqa: E402
+from integrations.tiktok import query_public_videos, validate_tiktok_url  # noqa: E402
 
 
 @pytest.fixture()
@@ -118,6 +120,110 @@ def test_url_endpoint_is_honest(client):
     assert d["integration"]["configured"] is False and d["analysis_status"] == "validated_only"
     assert client.post("/api/analyze-url", json={"url": "https://example.com"}).status_code == 422
     assert client.post("/api/analyze-url", data="nope").status_code == 400
+
+
+def test_research_video_query_route(monkeypatch):
+    class ResearchConfig(__import__("config").Config):
+        TIKTOK_API_ACCESS_TOKEN = "test-token"
+
+    calls = []
+
+    def fake_query(config, query):
+        calls.append((config, query))
+        return {
+            "videos": [{"id": "123", "like_count": 10, "view_count": 20,
+                        "comment_count": 2, "share_count": 1}],
+            "cursor": 100,
+            "has_more": True,
+        }
+
+    monkeypatch.setattr(app_module, "query_public_videos", fake_query)
+    test_client = create_app(ResearchConfig).test_client()
+    payload = {
+        "keyword": "hello world",
+        "region_codes": ["us", "CA"],
+        "start_date": "20261001",
+        "end_date": "20261002",
+        "max_count": 100,
+    }
+
+    response = test_client.post("/api/research/videos", json=payload)
+
+    assert response.status_code == 200
+    assert response.get_json()["data"]["videos"][0]["view_count"] == 20
+    assert calls == [(ResearchConfig, {
+        "keyword": "hello world",
+        "region_codes": ["US", "CA"],
+        "start_date": "20261001",
+        "end_date": "20261002",
+        "max_count": 100,
+        "cursor": 0,
+    })]
+
+
+@pytest.mark.parametrize("payload", [
+    {"keyword": "", "region_codes": ["US"], "start_date": "20261001", "end_date": "20261002"},
+    {"keyword": "hello", "region_codes": ["USA"], "start_date": "20261001", "end_date": "20261002"},
+    {"keyword": "hello", "region_codes": ["US"], "start_date": "20260230", "end_date": "20261002"},
+    {"keyword": "hello", "region_codes": ["US"], "start_date": "20261003", "end_date": "20261002"},
+    {"keyword": "hello", "region_codes": ["US"], "start_date": "20261001", "end_date": "20261002", "max_count": 101},
+])
+def test_research_video_query_rejects_invalid_input(payload):
+    response = create_app().test_client().post("/api/research/videos", json=payload)
+    assert response.status_code == 400
+    assert response.get_json()["ok"] is False
+
+
+def test_research_video_query_requires_token():
+    response = create_app().test_client().post("/api/research/videos", json={
+        "keyword": "hello",
+        "region_codes": ["US", "CA"],
+        "start_date": "20261001",
+        "end_date": "20261002",
+    })
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "research_api_not_configured"
+
+
+def test_query_public_videos_builds_authorized_request(monkeypatch):
+    class ResearchConfig(__import__("config").Config):
+        TIKTOK_API_ACCESS_TOKEN = "private-test-token"
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps({"data": {"videos": [], "cursor": 0, "has_more": False}}).encode()
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url == (
+            "https://open.tiktokapis.com/v2/research/video/query/"
+            "?fields=id%2Clike_count%2Cview_count%2Ccomment_count%2Cshare_count"
+        )
+        assert request.get_header("Authorization") == "Bearer private-test-token"
+        assert timeout == 20
+        body = json.loads(request.data)
+        assert body["query"]["and"] == [
+            {"operation": "IN", "field_name": "region_code", "field_values": ["US", "CA"]},
+            {"operation": "EQ", "field_name": "keyword", "field_values": ["hello world"]},
+        ]
+        assert body["is_random"] is False
+        return Response()
+
+    monkeypatch.setattr("integrations.tiktok.urlopen", fake_urlopen)
+    result = query_public_videos(ResearchConfig, {
+        "keyword": "hello world",
+        "region_codes": ["US", "CA"],
+        "start_date": "20261001",
+        "end_date": "20261002",
+        "max_count": 100,
+        "cursor": 0,
+    })
+    assert result == {"videos": [], "cursor": 0, "has_more": False}
 
 
 def test_time_burst_is_detected_and_reported_in_utc(client):
