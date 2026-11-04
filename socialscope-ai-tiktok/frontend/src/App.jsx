@@ -9,7 +9,9 @@ import Reports from './pages/Reports.jsx';
 import About from './pages/About.jsx';
 
 export default function App() {
-  const [page, setPage] = useState('overview');
+  const [page, setPage] = useState(() => (
+    new URLSearchParams(window.location.search).has('tiktok') ? 'url' : 'overview'
+  ));
   const [health, setHealth] = useState(null);
   const [analysis, setAnalysis] = useState(null); // held in memory only; nothing is persisted in the browser
 

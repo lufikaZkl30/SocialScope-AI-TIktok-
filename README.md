@@ -17,7 +17,7 @@ Suggested repository name: `socialscope-ai-tiktok`
 | **Promotional signals** | Configurable keyword categories plus link and phone-number patterns. Output says *why* a comment was flagged and is labelled a **signal, not confirmed advertising**. |
 | **Repeated / similar comments** | Exact duplicates, duplicates after normalization, TF-IDF + cosine-similarity groups, and repeated 3–4 word phrases. |
 | **Potential coordination indicators** | Repeated-text share, posting-time bursts (needs timestamps), repeated text inside bursts, same text across video IDs (needs `video_id`). Presented as **indicators, not proof**. No account is ever named or accused. |
-| **TikTok Research API** | Searches public video metadata by description keyword, region, and date when an approved access token is configured. Returns video IDs and counts; **does not retrieve comments**. |
+| **My TikTok videos** | Connects a TikTok account with Login Kit and the `video.list` scope, then pages through the authorized account's videos and metadata. It does not retrieve comments or search other users' videos. |
 | **TikTok URL check** | Validates the URL format and domain only. No scraping or access-restriction bypass. |
 | **Reports** | Dataset-quality table, limitations, and CSV export (comment results and summary). |
 
@@ -38,7 +38,7 @@ socialscope-ai-tiktok/
 │   │   ├── coordination.py     Exploratory coordination indicators
 │   │   ├── pipeline.py         Orchestration and response building
 │   │   └── errors.py
-│   ├── integrations/tiktok.py  URL validation + authorized Research API video queries
+│   ├── integrations/tiktok.py  URL validation + Login Kit and authorized video-list API
 │   └── tests/test_api.py       pytest suite
 ├── frontend/
 │   ├── src/{App.jsx, api.js, utils.js, components/, pages/}
@@ -63,8 +63,17 @@ copy .env.example .env
 python app.py
 ```
 
-The API runs at `http://127.0.0.1:5000`. Check it by opening `http://127.0.0.1:5000/api/health`.
-To enable public video queries, add your currently valid, approved TikTok Research API bearer token to `backend/.env` as `TIKTOK_API_ACCESS_TOKEN`. The feature remains disabled without it.
+The API runs at `http://127.0.0.1:5000`. The frontend runs at `http://localhost:5173`.
+
+To connect an account, create a TikTok for Developers app, add Login Kit, and request the `video.list` scope. Register this exact redirect URI in the app settings:
+
+```text
+http://localhost:5173/api/tiktok/callback
+```
+
+Copy `backend/.env.example` to `backend/.env` and set `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, and `TIKTOK_REDIRECT_URI` to the values registered in the developer portal. Keep `TIKTOK_REDIRECT_URI` exactly the same in both places, then restart the backend and frontend. Open **My TikTok Videos**, choose **Hubungkan akun TikTok**, and approve the requested `video.list` permission.
+
+The OAuth access and refresh tokens are kept in backend process memory, not browser storage. Restarting the backend clears the connection, so connect again. For production or multiple backend workers, use a protected shared server-side token store and HTTPS; do not put tokens in frontend code, `.env.example`, or Git.
 
 If PowerShell blocks `Activate.ps1` with an execution-policy error, run
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or use Command Prompt and `.venv\Scripts\activate.bat`.
@@ -112,24 +121,13 @@ All responses share one envelope. Success: `{"ok": true, "data": {...}}`. Error:
 | `GET /api/methodology` | Methods, keyword categories, limitations | — |
 | `POST /api/analyze-csv` | `multipart/form-data`: `file` (.csv), optional `similarity_threshold` (0.50–0.99) | 400 missing file or bad parameter · 413 too large / too many rows · 415 not `.csv` · 422 empty file, missing `comment` column, no usable rows |
 | `POST /api/analyze-url` | JSON `{"url": "..."}` | 400 bad request body · 422 invalid or unsupported URL |
-| `POST /api/research/videos` | Query approved TikTok Research API for public video metadata | 400 invalid query · 502 upstream/API error · 503 missing token, rate limit, or network error |
+| `GET /api/tiktok/status` | TikTok Login Kit configuration and current connection status | — |
+| `GET /api/tiktok/login` | Start OAuth authorization and request `video.list` | 503 app credentials missing |
+| `GET /api/tiktok/callback` | Validate OAuth state and exchange the authorization code | Redirects to the frontend with a connection status |
+| `POST /api/tiktok/videos` | Return a page of videos from the connected account | 400 invalid pagination · 401 not connected · 502 TikTok API error |
+| `POST /api/tiktok/disconnect` | Remove this app's in-memory account tokens | — |
 
-`POST /api/research/videos` queries the TikTok Research API. The request body uses `keyword`, `region_codes`, `start_date` and `end_date` (`YYYYMMDD`), with optional `max_count` (1-100) and `cursor`:
-
-```json
-{
-  "keyword": "hello world",
-  "region_codes": ["US", "CA"],
-  "start_date": "20261001",
-  "end_date": "20261001",
-  "max_count": 100,
-  "cursor": 0
-}
-```
-
-The backend requests `id`, `like_count`, `view_count`, `comment_count` and `share_count`. TikTok Research API access is restricted to approved applications; a token alone does not grant access. Put the approved bearer access token in `backend/.env` as `TIKTOK_API_ACCESS_TOKEN`. It is sent only from the backend to TikTok, never from the browser. Do not commit `.env` or paste tokens into chat. Follow TikTok's access, retention and use requirements.
-
-`/api/analyze-url` still only validates a URL and returns `analysis_status: "validated_only"`, `content_analyzed: false` and `comments_retrieved: 0`. The Research API video query does not fetch comments or feed the comment-analysis pipeline.
+The video-list endpoint returns videos owned by the account that authorized the app; it is not a public keyword search. Video metrics are the values returned by TikTok at request time. It does not retrieve or analyze comment text. `/api/analyze-url` only validates a URL and does not fetch TikTok data.
 
 ## Privacy and safety choices
 
@@ -145,13 +143,13 @@ The backend requests `id`, `like_count`, `view_count`, `comment_count` and `shar
 - **Promotional signals** are keyword and pattern matches and will include false positives (and miss unlisted wording).
 - **Similarity and repeats** often reflect trends, memes or catchphrases.
 - **Coordination indicators** are statistics about one file, not proof of coordinated behaviour.
-- **No automatic comment retrieval.** Pasting a URL does not fetch comments. The Research API integration only searches public video metadata; provide a CSV of comments you are permitted to analyse.
+- **No automatic comment retrieval.** Connecting an account only lists its video metadata; it does not fetch comment text. Provide a CSV of comments you are permitted to analyse.
 - Size is capped at 5,000 comments because similarity grouping grows quickly with row count.
 - Python-side tests cover the analysis and API; the UI was exercised in a real browser (see below) but there is no automated frontend test suite yet.
 
 ## Adding an authorized comment source later
 
-The Research API video endpoint does not return comments. If an approved API that provides comments is available, implement `CommentSource` in `backend/integrations/tiktok.py` (`status()` and `fetch_comments()`), then explicitly connect its authorized results to `analysis.pipeline`. Use only permissions you are authorized to use, and keep credentials in `backend/.env` (never committed).
+The `video.list` endpoint does not return comments. If an approved API that provides comments is available, implement `CommentSource` in `backend/integrations/tiktok.py` (`status()` and `fetch_comments()`), then explicitly connect its authorized results to `analysis.pipeline`. Use only permissions you are authorized to use, and keep credentials in `backend/.env` (never committed).
 
 ## Future improvements
 

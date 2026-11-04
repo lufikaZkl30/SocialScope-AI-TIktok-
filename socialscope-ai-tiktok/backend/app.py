@@ -1,9 +1,10 @@
 """SocialScope AI - Flask API (independent, unofficial educational project; not a TikTok product)."""
 import logging
-import re
+import secrets
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, request, session
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
@@ -12,10 +13,14 @@ from analysis.errors import AnalysisError
 from analysis.pipeline import LIMITATIONS, analyze_csv
 from config import Config
 from integrations.tiktok import (
-    TikTokResearchApiError,
+    TikTokApiError,
+    build_authorization_url,
+    clear_account_tokens,
+    exchange_authorization_code,
+    get_account_videos,
     get_connector,
-    query_public_videos,
-    research_api_status,
+    login_kit_status,
+    store_account_tokens,
     validate_tiktok_url,
 )
 
@@ -32,10 +37,22 @@ def fail(code, message, status, details=None):
         body["error"]["details"] = details
     return jsonify(body), status
 
+
+def _tiktok_frontend_redirect(config, status, reason=None):
+    query = {"tiktok": status}
+    if reason:
+        query["reason"] = reason
+    return redirect(f"{config.TIKTOK_FRONTEND_URL.rstrip('/')}?{urlencode(query)}")
+
 # Create the Flask app
 def create_app(config=Config):
     app = Flask(__name__)
     app.config.from_object(config)
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=getattr(config, "SESSION_COOKIE_SECURE", False),
+    )
     CORS(app, resources={r"/api/*": {"origins": config.CORS_ORIGINS}})
     keywords = promo.load_keywords(config.PROMO_KEYWORDS_PATH)
     patterns = promo.compile_patterns(keywords)
@@ -47,9 +64,71 @@ def create_app(config=Config):
                    "time": datetime.now(timezone.utc).isoformat(),
                    "integrations": {
                        "tiktok_api": connector.status(),
-                       "tiktok_research_api": research_api_status(config),
+                       "tiktok_account": login_kit_status(config, session.get("tiktok_session_id")),
                    },
                    "limits": {"max_upload_mb": config.MAX_UPLOAD_MB, "max_rows": config.MAX_ROWS}})
+
+    @app.get("/api/tiktok/status")
+    def tiktok_status():
+        return ok(login_kit_status(config, session.get("tiktok_session_id")))
+
+    @app.get("/api/tiktok/login")
+    def tiktok_login():
+        state = secrets.token_urlsafe(32)
+        session["tiktok_oauth_state"] = state
+        try:
+            return redirect(build_authorization_url(config, state))
+        except TikTokApiError as e:
+            return fail(e.code, e.message, e.status, e.details)
+
+    @app.get("/api/tiktok/callback")
+    def tiktok_callback():
+        expected_state = session.pop("tiktok_oauth_state", None)
+        received_state = request.args.get("state", "")
+        if not expected_state or not secrets.compare_digest(expected_state, received_state):
+            return _tiktok_frontend_redirect(config, "error", "invalid_state")
+        if request.args.get("error"):
+            return _tiktok_frontend_redirect(config, "error", "authorization_denied")
+        code = request.args.get("code", "")
+        if not code:
+            return _tiktok_frontend_redirect(config, "error", "missing_authorization_code")
+        try:
+            tokens = exchange_authorization_code(config, code)
+        except TikTokApiError:
+            return _tiktok_frontend_redirect(config, "error", "token_exchange_failed")
+
+        session_id = secrets.token_urlsafe(32)
+        store_account_tokens(session_id, tokens)
+        session["tiktok_session_id"] = session_id
+        return _tiktok_frontend_redirect(config, "connected")
+
+    @app.post("/api/tiktok/disconnect")
+    def tiktok_disconnect():
+        session_id = session.pop("tiktok_session_id", None)
+        if session_id:
+            clear_account_tokens(session_id)
+        return ok({"connected": False})
+
+    @app.post("/api/tiktok/videos")
+    def tiktok_videos():
+        payload = request.get_json(silent=True)
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return fail("invalid_request", "Send the video-list options as a JSON object.", 400)
+        cursor = payload.get("cursor", 0)
+        max_count = payload.get("max_count", 20)
+        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            return fail("invalid_parameter", "cursor must be a non-negative integer.", 400)
+        if isinstance(max_count, bool) or not isinstance(max_count, int) or not 1 <= max_count <= 20:
+            return fail("invalid_parameter", "max_count must be an integer from 1 to 20.", 400)
+        try:
+            videos = get_account_videos(
+                config, session.get("tiktok_session_id"), cursor=cursor, max_count=max_count
+            )
+        except TikTokApiError as e:
+            return fail(e.code, e.message, e.status, e.details)
+        return ok(videos)
 
     @app.get("/api/methodology")
     def methodology():
@@ -74,56 +153,6 @@ def create_app(config=Config):
         if not 0.5 <= threshold <= 0.99:
             return fail("invalid_parameter", "similarity_threshold must be between 0.50 and 0.99.", 400)
         result = analyze_csv(f.read(), f.filename[:120], config, patterns, threshold)
-        return ok(result)
-
-    @app.post("/api/research/videos")
-    def research_videos_route():
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            return fail("invalid_request", "Send the video query as a JSON object.", 400)
-
-        keyword = payload.get("keyword")
-        if not isinstance(keyword, str) or not keyword.strip() or len(keyword.strip()) > 200:
-            return fail("invalid_parameter", "keyword must contain 1-200 characters.", 400)
-
-        region_codes = payload.get("region_codes")
-        if (not isinstance(region_codes, list) or not 1 <= len(region_codes) <= 10
-                or any(not isinstance(code, str) or not re.fullmatch(r"[A-Za-z]{2}", code.strip())
-                       for code in region_codes)):
-            return fail("invalid_parameter", "region_codes must be a list of 1-10 two-letter country codes.", 400)
-        region_codes = list(dict.fromkeys(code.strip().upper() for code in region_codes))
-
-        dates = {}
-        for field in ("start_date", "end_date"):
-            value = payload.get(field)
-            if not isinstance(value, str) or not re.fullmatch(r"\d{8}", value):
-                return fail("invalid_parameter", f"{field} must use YYYYMMDD format.", 400)
-            try:
-                datetime.strptime(value, "%Y%m%d")
-            except ValueError:
-                return fail("invalid_parameter", f"{field} is not a valid calendar date.", 400)
-            dates[field] = value
-        if dates["start_date"] > dates["end_date"]:
-            return fail("invalid_parameter", "start_date must be on or before end_date.", 400)
-
-        max_count = payload.get("max_count", 100)
-        cursor = payload.get("cursor", 0)
-        if isinstance(max_count, bool) or not isinstance(max_count, int) or not 1 <= max_count <= 100:
-            return fail("invalid_parameter", "max_count must be an integer from 1 to 100.", 400)
-        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
-            return fail("invalid_parameter", "cursor must be a non-negative integer.", 400)
-
-        query = {
-            "keyword": keyword.strip(),
-            "region_codes": region_codes,
-            **dates,
-            "max_count": max_count,
-            "cursor": cursor,
-        }
-        try:
-            result = query_public_videos(config, query)
-        except TikTokResearchApiError as e:
-            return fail(e.code, e.message, e.status, e.details)
         return ok(result)
 
 # post endpoint to validate TikTok URL format and return analysis status

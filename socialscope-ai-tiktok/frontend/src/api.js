@@ -24,9 +24,12 @@ export const getMethodology = () => request('/api/methodology');
 export const analyzeUrl = (url) => request('/api/analyze-url', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
 });
-export const searchResearchVideos = (query) => request('/api/research/videos', {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query),
+export const getTikTokStatus = () => request('/api/tiktok/status');
+export const getTikTokVideos = (cursor = 0, maxCount = 20) => request('/api/tiktok/videos', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ cursor, max_count: maxCount }),
 });
+export const disconnectTikTok = () => request('/api/tiktok/disconnect', { method: 'POST' });
 export const analyzeCsv = (file, threshold) => {
   const fd = new FormData();
   fd.append('file', file);

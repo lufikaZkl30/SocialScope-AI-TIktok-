@@ -1,12 +1,14 @@
-"""TikTok URL validation, Research API video queries, and the comment-source placeholder.
+"""TikTok URL validation, Login Kit, video-list access, and the comment-source placeholder.
 
 * `validate_tiktok_url` only checks the FORMAT of a URL. It makes no network request.
-* Research API queries return public video metadata and require approved API access.
+* Video-list requests return metadata for the account that authorized the app.
 * No scraping and no access-restriction bypass exists in this project, by design.
-* The Research API integration does not retrieve comments. Use authorized credentials only.
+* The video-list API does not retrieve comments. Use authorized credentials only.
 """
 import json
 import re
+import threading
+import time
 from abc import ABC, abstractmethod
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
@@ -16,8 +18,22 @@ ALLOWED_HOSTS = {"tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com"
 VIDEO_PATH = re.compile(r"^/@[\w.\-]{1,64}/video/(\d{8,25})/?$")
 LEGACY_PATH = re.compile(r"^/v/(\d{8,25})(?:\.html)?/?$")
 SHORT_PATH = re.compile(r"^/(?:t/)?[A-Za-z0-9]{6,20}/?$")
-RESEARCH_VIDEO_FIELDS = ("id", "like_count", "view_count", "comment_count", "share_count")
-RESEARCH_VIDEO_QUERY_URL = "https://open.tiktokapis.com/v2/research/video/query/"
+TIKTOK_AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/"
+TIKTOK_TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"
+TIKTOK_VIDEO_LIST_URL = "https://open.tiktokapis.com/v2/video/list/"
+TIKTOK_VIDEO_FIELDS = (
+    "id",
+    "create_time",
+    "video_description",
+    "share_url",
+    "cover_image_url",
+    "like_count",
+    "view_count",
+    "comment_count",
+    "share_count",
+)
+_ACCOUNT_TOKENS = {}
+_ACCOUNT_TOKENS_LOCK = threading.RLock()
 
 
 def validate_tiktok_url(raw: str):
@@ -86,10 +102,10 @@ class UnconfiguredSource(CommentSource):
 
 
 def get_connector(config) -> CommentSource:
-    return UnconfiguredSource(token_present=bool((config.TIKTOK_API_ACCESS_TOKEN or "").strip()))
+    return UnconfiguredSource()
 
 
-class TikTokResearchApiError(Exception):
+class TikTokApiError(Exception):
     def __init__(self, code, message, status, details=None):
         super().__init__(message)
         self.code = code
@@ -98,119 +114,230 @@ class TikTokResearchApiError(Exception):
         self.details = details
 
 
-def research_api_status(config):
-    configured = bool((config.TIKTOK_API_ACCESS_TOKEN or "").strip())
+def login_kit_status(config, session_id=None):
+    configured = bool(config.TIKTOK_CLIENT_KEY and config.TIKTOK_CLIENT_SECRET
+                      and config.TIKTOK_REDIRECT_URI)
+    with _ACCOUNT_TOKENS_LOCK:
+        tokens = _ACCOUNT_TOKENS.get(session_id) if session_id else None
     return {
         "configured": configured,
-        "videos_query_available": configured,
-        "comments_available": False,
-        "state": "configured" if configured else "not_configured",
+        "connected": bool(tokens),
+        "required_scope": "video.list",
+        "scopes": tokens["scope"].split(",") if tokens else [],
         "message": (
-            "TikTok Research API is configured for public video metadata queries. "
-            "It does not retrieve comments."
+            "Connect TikTok to list videos from the authorized account."
             if configured else
-            "Set TIKTOK_API_ACCESS_TOKEN in backend/.env to enable public video queries. "
-            "TikTok Research API access must be approved; this API does not retrieve comments."
+            "Create a TikTok Developer app and set TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET, "
+            "and TIKTOK_REDIRECT_URI in backend/.env."
         ),
     }
 
 
-def query_public_videos(config, query):
-    token = (config.TIKTOK_API_ACCESS_TOKEN or "").strip()
-    if not token:
-        raise TikTokResearchApiError(
-            "research_api_not_configured",
-            "Configure an approved TikTok Research API access token in backend/.env.",
+def build_authorization_url(config, state):
+    if not login_kit_status(config)["configured"]:
+        raise TikTokApiError(
+            "tiktok_login_not_configured",
+            "Configure the TikTok Developer app credentials in backend/.env first.",
             503,
         )
-
-    url = f"{RESEARCH_VIDEO_QUERY_URL}?{urlencode({'fields': ','.join(RESEARCH_VIDEO_FIELDS)})}"
-    body = {
-        "query": {
-            "and": [
-                {"operation": "IN", "field_name": "region_code", "field_values": query["region_codes"]},
-                {"operation": "EQ", "field_name": "keyword", "field_values": [query["keyword"]]},
-            ],
-        },
-        "max_count": query["max_count"],
-        "cursor": query["cursor"],
-        "start_date": query["start_date"],
-        "end_date": query["end_date"],
-        "is_random": False,
+    params = {
+        "client_key": config.TIKTOK_CLIENT_KEY,
+        "response_type": "code",
+        "scope": "video.list",
+        "redirect_uri": config.TIKTOK_REDIRECT_URI,
+        "state": state,
     }
-    request = Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
+    return f"{TIKTOK_AUTHORIZE_URL}?{urlencode(params)}"
 
+
+def _read_json_response(response):
+    try:
+        result = json.loads(response.read().decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise TikTokApiError(
+            "tiktok_invalid_response",
+            "TikTok returned an unreadable response.",
+            502,
+        ) from exc
+    if not isinstance(result, dict):
+        raise TikTokApiError(
+            "tiktok_invalid_response",
+            "TikTok returned an unexpected response.",
+            502,
+        )
+    error = result.get("error")
+    if isinstance(error, dict) and error.get("code") not in (None, "ok"):
+        raise TikTokApiError(
+            "tiktok_upstream_error",
+            str(error.get("message") or "TikTok rejected the request.")[:300],
+            502,
+            {"upstream_code": str(error.get("code"))[:100]},
+        )
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("error_code") not in (None, 0, "0"):
+        raise TikTokApiError(
+            "tiktok_upstream_error",
+            str(data.get("description") or data.get("message") or "TikTok rejected the request.")[:300],
+            502,
+            {"upstream_code": str(data["error_code"])[:100]},
+        )
+    return data if isinstance(data, dict) else result
+
+
+def _send_request(request, error_code):
     try:
         with urlopen(request, timeout=20) as response:
-            result = json.loads(response.read().decode("utf-8"))
+            return _read_json_response(response)
     except HTTPError as exc:
-        messages = {
-            401: "TikTok rejected the access token. Check that it is valid and not expired.",
-            403: "TikTok denied access. Confirm that your app has Research API approval.",
-            429: "TikTok rate limit reached. Wait before trying again.",
-        }
         details = {"upstream_status": exc.code}
         try:
-            upstream = json.loads(exc.read().decode("utf-8"))
+            payload = json.loads(exc.read().decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            upstream = {}
-        upstream_error = upstream.get("error") if isinstance(upstream, dict) else None
+            payload = {}
+        upstream_error = payload.get("error") if isinstance(payload, dict) else None
+        message = {
+            401: "TikTok rejected the authorization. Reconnect your account and try again.",
+            403: "TikTok denied access. Confirm your app has the video.list scope approved.",
+            429: "TikTok rate limit reached. Wait before trying again.",
+        }.get(exc.code)
         if isinstance(upstream_error, dict):
-            upstream_code = upstream_error.get("code")
+            if upstream_error.get("code"):
+                details["upstream_code"] = str(upstream_error["code"])[:100]
             upstream_message = upstream_error.get("message")
-            if upstream_code:
-                details["upstream_code"] = str(upstream_code)[:100]
-            if exc.code not in messages and isinstance(upstream_message, str) and upstream_message:
-                messages[exc.code] = upstream_message[:300]
-        raise TikTokResearchApiError(
-            "research_api_upstream_error",
-            messages.get(exc.code, f"TikTok Research API returned HTTP {exc.code}."),
-            502 if exc.code != 429 else 503,
+            if not message and isinstance(upstream_message, str) and upstream_message:
+                message = upstream_message[:300]
+        raise TikTokApiError(
+            error_code,
+            message or f"TikTok returned HTTP {exc.code}.",
+            503 if exc.code == 429 else 502,
             details,
         ) from exc
     except (URLError, TimeoutError) as exc:
-        raise TikTokResearchApiError(
-            "research_api_unreachable",
-            "Could not reach TikTok Research API. Try again later.",
+        raise TikTokApiError(
+            "tiktok_unreachable",
+            "Could not reach TikTok. Check your connection and try again.",
             503,
         ) from exc
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise TikTokResearchApiError(
-            "research_api_invalid_response",
-            "TikTok Research API returned an unreadable response.",
-            502,
-        ) from exc
 
-    if not isinstance(result, dict):
-        raise TikTokResearchApiError(
-            "research_api_invalid_response",
-            "TikTok Research API returned an unexpected response.",
+
+def _post_form(url, values, error_code):
+    request = Request(
+        url,
+        data=urlencode(values).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    return _send_request(request, error_code)
+
+
+def exchange_authorization_code(config, code):
+    if not login_kit_status(config)["configured"]:
+        raise TikTokApiError(
+            "tiktok_login_not_configured",
+            "Configure the TikTok Developer app credentials in backend/.env first.",
+            503,
+        )
+    data = _post_form(TIKTOK_TOKEN_URL, {
+        "client_key": config.TIKTOK_CLIENT_KEY,
+        "client_secret": config.TIKTOK_CLIENT_SECRET,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": config.TIKTOK_REDIRECT_URI,
+    }, "tiktok_token_exchange_failed")
+    access_token = data.get("access_token")
+    refresh_token = data.get("refresh_token")
+    scopes = {scope.strip() for scope in str(data.get("scope", "")).split(",") if scope.strip()}
+    if not isinstance(access_token, str) or not access_token or not isinstance(refresh_token, str) or not refresh_token:
+        raise TikTokApiError(
+            "tiktok_invalid_token_response",
+            "TikTok did not return the access and refresh tokens required for this connection.",
             502,
         )
-
-    error = result.get("error")
-    if isinstance(error, dict) and error.get("code") not in (None, "ok"):
-        api_message = error.get("message")
-        message = api_message[:300] if isinstance(api_message, str) and api_message else (
-            "TikTok Research API rejected the query."
+    if "video.list" not in scopes:
+        raise TikTokApiError(
+            "tiktok_scope_missing",
+            "TikTok did not grant video.list. Enable that scope for your app and reconnect.",
+            403,
         )
-        raise TikTokResearchApiError(
-            "research_api_query_rejected",
-            message,
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "open_id": data.get("open_id"),
+        "scope": ",".join(sorted(scopes)),
+        "expires_at": time.time() + int(data.get("expires_in", 86400)),
+        "refresh_expires_at": time.time() + int(data.get("refresh_expires_in", 31536000)),
+    }
+
+
+def store_account_tokens(session_id, tokens):
+    with _ACCOUNT_TOKENS_LOCK:
+        _ACCOUNT_TOKENS[session_id] = tokens
+
+
+def clear_account_tokens(session_id):
+    with _ACCOUNT_TOKENS_LOCK:
+        _ACCOUNT_TOKENS.pop(session_id, None)
+
+
+def _refresh_account_token(config, tokens):
+    if tokens["refresh_expires_at"] <= time.time():
+        raise TikTokApiError(
+            "tiktok_session_expired",
+            "TikTok authorization expired. Reconnect your account.",
+            401,
+        )
+    data = _post_form(TIKTOK_TOKEN_URL, {
+        "client_key": config.TIKTOK_CLIENT_KEY,
+        "client_secret": config.TIKTOK_CLIENT_SECRET,
+        "grant_type": "refresh_token",
+        "refresh_token": tokens["refresh_token"],
+    }, "tiktok_token_refresh_failed")
+    access_token = data.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        raise TikTokApiError(
+            "tiktok_invalid_token_response",
+            "TikTok did not return a refreshed access token. Reconnect your account.",
             502,
-            {"upstream_code": str(error["code"])[:100]},
+        )
+    refreshed = {
+        **tokens,
+        "access_token": access_token,
+        "refresh_token": data.get("refresh_token") or tokens["refresh_token"],
+        "expires_at": time.time() + int(data.get("expires_in", 86400)),
+        "refresh_expires_at": time.time() + int(data.get("refresh_expires_in", 31536000)),
+    }
+    return refreshed
+
+
+def get_account_videos(config, session_id, cursor=0, max_count=20):
+    with _ACCOUNT_TOKENS_LOCK:
+        tokens = _ACCOUNT_TOKENS.get(session_id)
+    if not tokens:
+        raise TikTokApiError(
+            "tiktok_not_connected",
+            "Connect your TikTok account before loading its videos.",
+            401,
         )
 
-    data = result.get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("videos"), list):
-        raise TikTokResearchApiError(
-            "research_api_invalid_response",
-            "TikTok Research API returned an unexpected video result.",
+    if tokens["expires_at"] <= time.time() + 60:
+        tokens = _refresh_account_token(config, tokens)
+        store_account_tokens(session_id, tokens)
+
+    url = f"{TIKTOK_VIDEO_LIST_URL}?{urlencode({'fields': ','.join(TIKTOK_VIDEO_FIELDS)})}"
+    request = Request(
+        url,
+        data=json.dumps({"max_count": max_count, "cursor": cursor}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {tokens['access_token']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    data = _send_request(request, "tiktok_video_list_failed")
+    if not isinstance(data.get("videos"), list):
+        raise TikTokApiError(
+            "tiktok_invalid_response",
+            "TikTok returned an unexpected video list.",
             502,
         )
     return data

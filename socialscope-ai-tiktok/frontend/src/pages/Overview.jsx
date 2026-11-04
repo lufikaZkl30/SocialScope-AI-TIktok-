@@ -4,12 +4,12 @@ import { Alert, Card, ChartTooltipStyle, EmptyState, SectionTitle, Stat } from '
 import { COLORS, fmtDate, nf, pct } from '../utils.js';
 
 function StatusRow({ health, analysis }) {
-  const api = health?.integrations?.tiktok_research_api;
+  const api = health?.integrations?.tiktok_account;
   const rows = [
     ['Backend', health === null ? 'Checking…' : health.error ? 'Offline' : `Connected (v${health.version})`],
     ['Analysis status', analysis ? 'Analyzed from uploaded CSV' : 'Waiting for data'],
     ['Data source', analysis ? `CSV upload: ${analysis.data_source.filename}` : 'None loaded'],
-    ['TikTok Research API', api ? (api.configured ? 'Configured' : 'Not configured') : 'Unknown'],
+    ['TikTok account', api ? (api.connected ? 'Connected' : api.configured ? 'Ready to connect' : 'Login Kit not configured') : 'Unknown'],
   ];
   return (
     <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -51,7 +51,7 @@ export default function Overview({ analysis, health, onNavigate }) {
         <EmptyState icon={BarChart3} title="No comments analyzed yet"
           actions={<>
             <button className="btn-primary" onClick={() => onNavigate('comments')}><UploadCloud className="h-4 w-4" />Upload a CSV</button>
-            <button className="btn-ghost" onClick={() => onNavigate('url')}><Link2 className="h-4 w-4" />Search TikTok videos</button>
+            <button className="btn-ghost" onClick={() => onNavigate('url')}><Link2 className="h-4 w-4" />My TikTok videos</button>
           </>}>
           Upload a CSV of TikTok comments to see sentiment, promotional signals, repeated wording and potential coordination indicators.
           Every number in this dashboard comes from data you upload; nothing here is sample or placeholder data.
