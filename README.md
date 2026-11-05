@@ -88,6 +88,26 @@ npm run dev
 
 Open **http://localhost:5173**. The dev server proxies `/api` to the backend, so no CORS setup is needed.
 
+## Deploy to Vercel
+
+The root [`vercel.json`](./vercel.json) defines two public services:
+
+- `backend` uses `socialscope-ai-tiktok/backend` with the Flask framework. The `/api/*` rewrite sends API requests to this service.
+- `frontend` uses `socialscope-ai-tiktok/frontend` with the Vite framework. The catch-all rewrite sends all other paths here.
+
+The frontend calls same-origin `/api/...` URLs, which Vercel routes to the backend. The browser does not call the backend service directly, and the backend calls TikTok's external API rather than another repository service, so there are no service-to-service bindings.
+
+Configure these environment variables for the Vercel deployment. Register the exact `TIKTOK_REDIRECT_URI` in the TikTok Developer Portal:
+
+```text
+TIKTOK_REDIRECT_URI=https://<your-domain>/api/tiktok/callback
+TIKTOK_FRONTEND_URL=https://<your-domain>
+FLASK_SECRET_KEY=<a-stable-random-secret>
+SESSION_COOKIE_SECURE=1
+```
+
+Set `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET` from your TikTok Developer app as backend environment variables. Do not commit credentials. TikTok OAuth tokens are currently held in backend process memory, so the account connection is not reliable across Vercel serverless invocations until a persistent private token store is added.
+
 ### Shortcut
 
 Double-click `scripts\start-backend.bat` and `scripts\start-frontend.bat` (each opens its own window; the first run installs dependencies).
