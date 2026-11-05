@@ -108,9 +108,11 @@ SESSION_COOKIE_SECURE=1
 
 Set `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET` from your TikTok Developer app as backend environment variables. Do not commit credentials. TikTok OAuth tokens are currently held in backend process memory, so the account connection is not reliable across Vercel serverless invocations until a persistent private token store is added.
 
-### Shortcut
+### Start from VS Code
 
-Double-click `scripts\start-backend.bat` and `scripts\start-frontend.bat` (each opens its own window; the first run installs dependencies).
+Open the repository folder in VS Code, then run **Terminal → Run Task… → SocialScope AI: Start**. The backend starts first in a VS Code integrated terminal; once Flask reports that it is listening, VS Code starts the frontend in a second integrated terminal and opens the site at `http://127.0.0.1:5173`. Both services and their logs stay inside VS Code. Stop them with the terminal's trash button or **Terminal → Terminate Task**.
+
+The Windows scripts in `socialscope-ai-tiktok\scripts` are used by the VS Code tasks and can also be run separately if needed.
 
 ### Tests and production build
 

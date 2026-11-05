@@ -1,0 +1,89 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SocialScope AI: Backend",
+      "type": "process",
+      "command": "${env:ComSpec}",
+      "args": [
+        "/d",
+        "/c",
+        "call",
+        "${workspaceFolder}\\socialscope-ai-tiktok\\scripts\\start-backend.bat"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": [
+          {
+            "regexp": "^(.*)$",
+            "message": 1
+          }
+        ],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".+",
+          "endsPattern": "Running on http://127\\.0\\.0\\.1:5000"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      }
+    },
+    {
+      "label": "SocialScope AI: Frontend",
+      "type": "process",
+      "command": "${env:ComSpec}",
+      "args": [
+        "/d",
+        "/c",
+        "call",
+        "${workspaceFolder}\\socialscope-ai-tiktok\\scripts\\start-frontend.bat"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": [
+          {
+            "regexp": "^(.*)$",
+            "message": 1
+          }
+        ],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".+",
+          "endsPattern": "Local:\\s+http://127\\.0\\.0\\.1:5173"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": false
+      },
+      "serverReadyAction": {
+        "pattern": "Local:\\s+(http://127\\.0\\.0\\.1:5173\\S*)",
+        "uriFormat": "%s",
+        "action": "openExternally"
+      }
+    },
+    {
+      "label": "SocialScope AI: Start",
+      "dependsOn": [
+        "SocialScope AI: Backend",
+        "SocialScope AI: Frontend"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      }
+    }
+  ]
+}
